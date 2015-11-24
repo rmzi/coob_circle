@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+	<link rel="stylesheet" href="css/main.css">
+	<!-- Scripts Section -->
+	<script src="//d3js.org/d3.v3.min.js" charset="utf-8"></script>
+	<script src="js/main.js"></script>
+</head>
+<body onload="grow()">
+	<div class="container">
+		<div class="center">
+	  		<svg id="canvas" width="500" height="500" style="fill: steelblue">
+	  		<defs>
+	  			<clipPath id="dish_clip">
+	  				<circle cx="250" cy="250" r="200"></circle>
+	  			</clipPath>
+	  			<filter id="f1" x="0" y="0">
+			      <feGaussianBlur in="SourceGraphic" stdDeviation="1" />
+			    </filter>
+	  		</defs>
+	  			<!-- Add filter with filter="url(#f1)" -->
+				<circle id="dish" cx="250" cy="250" r="10" stroke="black" stroke-width="1"></circle>
+				<circle id="cee" cx="475" cy="250" r="10" stroke="black" stroke-width="1" clip-path="url(#dish_clip)"></circle>
+				<ellipse id="ayy_bot" cx="175" cy="500" rx="10" ry="20" stroke="black" stroke-width="1" clip-path="url(#dish_clip)"></ellipse>
+				<circle id="ayy_top" cx="175" cy="200" r="10" stroke="black" stroke-width="1" ></circle>
+			</svg>
+		</div>
+	</div>
+</body>
+</html>
