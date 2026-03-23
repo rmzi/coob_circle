@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>petri.rmzi.world</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #0a0a0f; font-family: 'Courier New', monospace; }
+  canvas { display: block; }
+  #overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: radial-gradient(ellipse at center, #1a1a2e 0%, #0a0a0f 100%);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    z-index: 1000; cursor: pointer; transition: opacity 0.8s ease;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay h1 {
+    font-size: 3rem; color: #7fdbca; letter-spacing: 0.3em;
+    text-transform: uppercase; margin-bottom: 1rem;
+    text-shadow: 0 0 30px rgba(127, 219, 202, 0.5);
+  }
+  #overlay p {
+    font-size: 1rem; color: #546e7a; letter-spacing: 0.15em;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  .dg.ac { z-index: 100 !important; }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <h1>Petri</h1>
+  <p>click to begin observation</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/dat.gui@0.7.9/build/dat.gui.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { FilmPass } from 'three/addons/postprocessing/FilmPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const config = {
+  growthSpeed: 1.0,
+  mutationRate: 0.3,
+  dishColor: '#2a4a3a',
+  soundVolume: 0.5,
+  paused: false,
+  bloomIntensity: 0.8,
+  particleCount: 300,
+  autoRotate: true,
+  creatureCount: 7,
+};
+
+// ============================================================================
+// AUDIO ENGINE — Nintendo-style generative sounds
+// ============================================================================
+
+class AudioEngine {
+  constructor() {
+    this.ctx = null;
+    this.masterGain = null;
+    this.ready = false;
+  }
+
+  init() {
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.value = config.soundVolume;
+    this.masterGain.connect(this.ctx.destination);
+
+    // Compressor for cleaner mixing
+    this.compressor = this.ctx.createDynamicsCompressor();
+    this.compressor.threshold.value = -24;
+    this.compressor.ratio.value = 4;
+    this.compressor.connect(this.masterGain);
+
+    this.ready = true;
+    this.startAmbient();
+  }
+
+  setVolume(v) {
+    if (this.masterGain) this.masterGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.1);
+  }
+
+  // Ambient low hum — filtered noise + sine drone
+  startAmbient() {
+    // Low sine drone
+    const drone = this.ctx.createOscillator();
+    drone.type = 'sine';
+    drone.frequency.value = 55;
+    const droneGain = this.ctx.createGain();
+    droneGain.gain.value = 0.04;
+    const droneFilter = this.ctx.createBiquadFilter();
+    droneFilter.type = 'lowpass';
+    droneFilter.frequency.value = 200;
+    drone.connect(droneFilter);
+    droneFilter.connect(droneGain);
+    droneGain.connect(this.compressor);
+    drone.start();
+
+    // Subtle LFO on drone pitch
+    const lfo = this.ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.1;
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 3;
+    lfo.connect(lfoGain);
+    lfoGain.connect(drone.frequency);
+    lfo.start();
+
+    // Filtered noise bed
+    const bufferSize = this.ctx.sampleRate * 2;
+    const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = noiseBuffer;
+    noise.loop = true;
+    const noiseFilter = this.ctx.createBiquadFilter();
+    noiseFilter.type = 'bandpass';
+    noiseFilter.frequency.value = 120;
+    noiseFilter.Q.value = 2;
+    const noiseGain = this.ctx.createGain();
+    noiseGain.gain.value = 0.015;
+    noise.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(this.compressor);
+    noise.start();
+  }
+
+  // Spawn pop — ascending chirp
+  playSpawn() {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(200 + Math.random() * 100, t);
+    osc.frequency.exponentialRampToValueAtTime(800 + Math.random() * 400, t + 0.12);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    osc.connect(g);
+    g.connect(this.compressor);
+    osc.start(t);
+    osc.stop(t + 0.25);
+
+    // Second harmonic for richness
+    const osc2 = this.ctx.createOscillator();
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(400 + Math.random() * 200, t);
+    osc2.frequency.exponentialRampToValueAtTime(1200, t + 0.1);
+    const g2 = this.ctx.createGain();
+    g2.gain.setValueAtTime(0.08, t);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc2.connect(g2);
+    g2.connect(this.compressor);
+    osc2.start(t);
+    osc2.stop(t + 0.2);
+  }
+
+  // Growth milestone — happy ascending arpeggio
+  playGrowth(pitch = 0) {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime;
+    const baseFreq = 330 + pitch * 50;
+    const scale = [1, 1.25, 1.5, 1.875]; // Major-ish intervals
+    scale.forEach((ratio, i) => {
+      const osc = this.ctx.createOscillator();
+      osc.type = i % 2 === 0 ? 'square' : 'triangle';
+      osc.frequency.value = baseFreq * ratio;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0, t + i * 0.08);
+      g.gain.linearRampToValueAtTime(0.08, t + i * 0.08 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.15);
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 2000;
+      osc.connect(filter);
+      filter.connect(g);
+      g.connect(this.compressor);
+      osc.start(t + i * 0.08);
+      osc.stop(t + i * 0.08 + 0.2);
+    });
+  }
+
+  // Movement squish
+  playSquish() {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime;
+    const bufferSize = this.ctx.sampleRate * 0.1;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const d = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) d[i] = Math.random() * 2 - 1;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(400, t);
+    filter.frequency.exponentialRampToValueAtTime(150, t + 0.08);
+    filter.Q.value = 5;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.1, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+    src.connect(filter);
+    filter.connect(g);
+    g.connect(this.compressor);
+    src.start(t);
+  }
+
+  // UI blip
+  playBlip() {
+    if (!this.ready) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.setValueAtTime(1100, t + 0.03);
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.06, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+    osc.connect(g);
+    g.connect(this.compressor);
+    osc.start(t);
+    osc.stop(t + 0.1);
+  }
+}
+
+const audio = new AudioEngine();
+
+// ============================================================================
+// THREE.JS SCENE SETUP
+// ============================================================================
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0f);
+scene.fog = new THREE.FogExp2(0x0a0a0f, 0.035);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 12, 14);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.minDistance = 5;
+controls.maxDistance = 30;
+controls.maxPolarAngle = Math.PI / 2.1;
+controls.autoRotate = config.autoRotate;
+controls.autoRotateSpeed = 0.5;
+
+// ============================================================================
+// LIGHTING
+// ============================================================================
+
+const ambientLight = new THREE.AmbientLight(0x334455, 0.6);
+scene.add(ambientLight);
+
+const mainLight = new THREE.DirectionalLight(0xffeedd, 1.0);
+mainLight.position.set(5, 15, 5);
+mainLight.castShadow = false;
+scene.add(mainLight);
+
+const rimLight = new THREE.DirectionalLight(0x5588ff, 0.4);
+rimLight.position.set(-5, 8, -5);
+scene.add(rimLight);
+
+const pointLight1 = new THREE.PointLight(0x44ffaa, 0.6, 20);
+pointLight1.position.set(3, 5, 3);
+scene.add(pointLight1);
+
+const pointLight2 = new THREE.PointLight(0xff6644, 0.4, 20);
+pointLight2.position.set(-3, 5, -3);
+scene.add(pointLight2);
+
+// ============================================================================
+// POST-PROCESSING
+// ============================================================================
+
+const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(scene, camera);
+composer.addPass(renderPass);
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  config.bloomIntensity, 0.4, 0.6
+);
+composer.addPass(bloomPass);
+
+const filmPass = new FilmPass(0.15);
+composer.addPass(filmPass);
+
+const outputPass = new OutputPass();
+composer.addPass(outputPass);
+
+// ============================================================================
+// PETRI DISH
+// ============================================================================
+
+const dishRadius = 6;
+const dishGroup = new THREE.Group();
+
+// Dish base (agar)
+const agarGeo = new THREE.CircleGeometry(dishRadius - 0.15, 64);
+const agarMat = new THREE.MeshStandardMaterial({
+  color: new THREE.Color(config.dishColor),
+  roughness: 0.7,
+  metalness: 0.05,
+  transparent: true,
+  opacity: 0.9,
+});
+const agar = new THREE.Mesh(agarGeo, agarMat);
+agar.rotation.x = -Math.PI / 2;
+agar.position.y = 0.01;
+dishGroup.add(agar);
+
+// Dish rim — glass torus
+const rimGeo = new THREE.TorusGeometry(dishRadius, 0.2, 16, 64);
+const rimMat = new THREE.MeshPhysicalMaterial({
+  color: 0xaaccdd,
+  roughness: 0.05,
+  metalness: 0.0,
+  transmission: 0.8,
+  thickness: 0.5,
+  transparent: true,
+  opacity: 0.6,
+  clearcoat: 1.0,
+});
+const rim = new THREE.Mesh(rimGeo, rimMat);
+rim.rotation.x = -Math.PI / 2;
+rim.position.y = 0.3;
+dishGroup.add(rim);
+
+// Dish bottom (glass floor underneath agar)
+const bottomGeo = new THREE.CircleGeometry(dishRadius, 64);
+const bottomMat = new THREE.MeshPhysicalMaterial({
+  color: 0x112233,
+  roughness: 0.1,
+  metalness: 0.0,
+  transmission: 0.3,
+  transparent: true,
+  opacity: 0.4,
+});
+const bottom = new THREE.Mesh(bottomGeo, bottomMat);
+bottom.rotation.x = -Math.PI / 2;
+bottom.position.y = -0.05;
+dishGroup.add(bottom);
+
+scene.add(dishGroup);
+
+// ============================================================================
+// CREATURE SYSTEM — Procedural Monsters
+// ============================================================================
+
+const PALETTES = [
+  [0x9b59b6, 0x8e44ad], // purple
+  [0x1abc9c, 0x16a085], // teal
+  [0xe67e22, 0xd35400], // orange
+  [0x2ecc71, 0x27ae60], // green
+  [0xe74c3c, 0xc0392b], // red
+  [0x3498db, 0x2980b9], // blue
+  [0xf39c12, 0xe67e22], // gold
+  [0xff6b9d, 0xc44569], // pink
+  [0x00cec9, 0x0984e3], // cyan
+  [0xa29bfe, 0x6c5ce7], // lavender
+];
+
+class Creature {
+  constructor(index) {
+    this.group = new THREE.Group();
+    this.index = index;
+    this.growth = 0; // 0 to 1
+    this.growthPhase = 0; // 0, 1, 2
+    this.lastPhase = -1;
+    this.age = 0;
+    this.alive = true;
+
+    // Random traits
+    const palette = PALETTES[Math.floor(Math.random() * PALETTES.length)];
+    this.bodyColor = palette[0];
+    this.accentColor = palette[1];
+    this.eyeCount = 1 + Math.floor(Math.random() * 4);
+    this.tentacleCount = Math.floor(Math.random() * 7);
+    this.armCount = Math.floor(Math.random() * 4);
+    this.bodyScale = 0.3 + Math.random() * 0.5;
+    this.bodyElongation = 0.7 + Math.random() * 0.8;
+    this.wobbleSpeed = 0.5 + Math.random() * 2;
+    this.wobbleAmount = 0.02 + Math.random() * 0.04;
+    this.moveSpeed = 0.1 + Math.random() * 0.3;
+    this.breatheSpeed = 1 + Math.random() * 2;
+    this.emissiveIntensity = 0.15 + Math.random() * 0.3;
+
+    // Movement
+    const angle = Math.random() * Math.PI * 2;
+    const dist = Math.random() * (dishRadius - 1.5);
+    this.group.position.set(Math.cos(angle) * dist, 0.15, Math.sin(angle) * dist);
+    this.moveAngle = Math.random() * Math.PI * 2;
+    this.moveTimer = 0;
+    this.moveChangeInterval = 2 + Math.random() * 5;
+
+    // Body material
+    this.bodyMat = new THREE.MeshStandardMaterial({
+      color: this.bodyColor,
+      roughness: 0.4,
+      metalness: 0.1,
+      emissive: this.bodyColor,
+      emissiveIntensity: this.emissiveIntensity,
+    });
+
+    // Create initial microbe body
+    this.createBody();
+
+    // Parts to add during growth
+    this.eyes = [];
+    this.tentacles = [];
+    this.arms = [];
+    this.bumps = [];
+
+    this.group.scale.setScalar(0.05); // Start tiny
+    scene.add(this.group);
+  }
+
+  createBody() {
+    const geo = new THREE.SphereGeometry(1, 24, 18);
+    // Deform for organic shape
+    const pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const v = new THREE.Vector3().fromBufferAttribute(pos, i);
+      const noise = Math.sin(v.x * 3.7) * Math.cos(v.y * 2.3) * Math.sin(v.z * 4.1) * 0.15;
+      v.multiplyScalar(1 + noise);
+      v.y *= this.bodyElongation;
+      pos.setXYZ(i, v.x, v.y, v.z);
+    }
+    geo.computeVertexNormals();
+    this.body = new THREE.Mesh(geo, this.bodyMat);
+    this.body.position.y = 0.5;
+    this.group.add(this.body);
+  }
+
+  addEyes() {
+    const eyeBaseY = 0.6 + this.bodyElongation * 0.3;
+    for (let i = 0; i < this.eyeCount; i++) {
+      const eyeGroup = new THREE.Group();
+      const angle = (i / this.eyeCount) * Math.PI * 1.2 - Math.PI * 0.3;
+      const r = 0.6 + Math.random() * 0.3;
+
+      // Eye white
+      const whiteGeo = new THREE.SphereGeometry(0.22, 12, 12);
+      const whiteMat = new THREE.MeshStandardMaterial({
+        color: 0xffffff, roughness: 0.2, metalness: 0.0,
+        emissive: 0xffffff, emissiveIntensity: 0.1,
+      });
+      const white = new THREE.Mesh(whiteGeo, whiteMat);
+
+      // Pupil
+      const pupilGeo = new THREE.SphereGeometry(0.12, 10, 10);
+      const pupilMat = new THREE.MeshStandardMaterial({
+        color: 0x111111, roughness: 0.5, metalness: 0.3,
+      });
+      const pupil = new THREE.Mesh(pupilGeo, pupilMat);
+      pupil.position.z = 0.15;
+
+      // Iris color ring
+      const irisGeo = new THREE.SphereGeometry(0.16, 10, 10);
+      const irisMat = new THREE.MeshStandardMaterial({
+        color: this.accentColor, roughness: 0.3,
+        emissive: this.accentColor, emissiveIntensity: 0.3,
+      });
+      const iris = new THREE.Mesh(irisGeo, irisMat);
+      iris.position.z = 0.1;
+
+      eyeGroup.add(white, iris, pupil);
+      eyeGroup.position.set(Math.sin(angle) * r, eyeBaseY, Math.cos(angle) * r);
+      eyeGroup.lookAt(
+        eyeGroup.position.x + Math.sin(angle),
+        eyeGroup.position.y,
+        eyeGroup.position.z + Math.cos(angle)
+      );
+      eyeGroup.scale.setScalar(0);
+      this.body.add(eyeGroup);
+      this.eyes.push({ group: eyeGroup, angle, targetScale: 0.8 + Math.random() * 0.5 });
+    }
+  }
+
+  addTentacles() {
+    for (let i = 0; i < this.tentacleCount; i++) {
+      const angle = (i / this.tentacleCount) * Math.PI * 2 + Math.random() * 0.5;
+      const length = 0.8 + Math.random() * 1.2;
+      const segments = 8;
+      const points = [];
+      for (let j = 0; j <= segments; j++) {
+        const t = j / segments;
+        const curl = Math.sin(t * Math.PI * 1.5) * 0.3;
+        points.push(new THREE.Vector3(
+          Math.sin(angle) * (0.8 + t * length) + curl * Math.cos(angle),
+          0.3 - t * 0.4,
+          Math.cos(angle) * (0.8 + t * length) + curl * Math.sin(angle)
+        ));
+      }
+      const curve = new THREE.CatmullRomCurve3(points);
+      const tubeGeo = new THREE.TubeGeometry(curve, 12, 0.08 * (1 - 0.5 * 0), 8, false);
+      // Taper the tube by modifying vertices
+      const tubePos = tubeGeo.attributes.position;
+      for (let j = 0; j < tubePos.count; j++) {
+        const v = new THREE.Vector3().fromBufferAttribute(tubePos, j);
+        // Find approximate t along tube
+        const closestPoint = curve.getPoint(0);
+        let minDist = Infinity;
+        let approxT = 0;
+        for (let k = 0; k <= 20; k++) {
+          const pt = curve.getPoint(k / 20);
+          const d = v.distanceTo(pt);
+          if (d < minDist) { minDist = d; approxT = k / 20; }
+        }
+        const taper = 1 - approxT * 0.7;
+        const center = curve.getPoint(approxT);
+        v.sub(center).multiplyScalar(taper).add(center);
+        tubePos.setXYZ(j, v.x, v.y, v.z);
+      }
+      tubeGeo.computeVertexNormals();
+      const tentMat = this.bodyMat.clone();
+      tentMat.color = new THREE.Color(this.accentColor);
+      const tentacle = new THREE.Mesh(tubeGeo, tentMat);
+      tentacle.scale.setScalar(0);
+      this.body.add(tentacle);
+      this.tentacles.push({
+        mesh: tentacle, angle, length, points, curve,
+        wiggleOffset: Math.random() * Math.PI * 2,
+        wiggleSpeed: 1 + Math.random() * 2,
+      });
+    }
+  }
+
+  addArms() {
+    for (let i = 0; i < this.armCount; i++) {
+      const angle = (i / this.armCount) * Math.PI * 2 + Math.random() * 0.3;
+      const armGroup = new THREE.Group();
+
+      // Upper arm
+      const upperGeo = new THREE.CylinderGeometry(0.1, 0.08, 0.6, 8);
+      const armMat = this.bodyMat.clone();
+      const upper = new THREE.Mesh(upperGeo, armMat);
+      upper.position.y = 0.3;
+      upper.rotation.z = Math.PI / 4;
+      armGroup.add(upper);
+
+      // Hand blob
+      const handGeo = new THREE.SphereGeometry(0.12, 8, 8);
+      const hand = new THREE.Mesh(handGeo, armMat);
+      hand.position.set(0.35, 0.55, 0);
+      armGroup.add(hand);
+
+      armGroup.position.set(Math.sin(angle) * 0.7, 0.3, Math.cos(angle) * 0.7);
+      armGroup.rotation.y = -angle;
+      armGroup.scale.setScalar(0);
+      this.body.add(armGroup);
+      this.arms.push({
+        group: armGroup, angle,
+        waveOffset: Math.random() * Math.PI * 2,
+        waveSpeed: 1 + Math.random() * 1.5,
+      });
+    }
+  }
+
+  addBumps() {
+    const bumpCount = 3 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < bumpCount; i++) {
+      const theta = Math.random() * Math.PI;
+      const phi = Math.random() * Math.PI * 2;
+      const r = 0.85 + Math.random() * 0.2;
+      const size = 0.1 + Math.random() * 0.2;
+      const bumpGeo = new THREE.SphereGeometry(size, 8, 8);
+      const bumpMat = this.bodyMat.clone();
+      bumpMat.color = new THREE.Color(this.accentColor).lerp(new THREE.Color(this.bodyColor), 0.5);
+      const bump = new THREE.Mesh(bumpGeo, bumpMat);
+      bump.position.set(
+        Math.sin(theta) * Math.cos(phi) * r,
+        Math.cos(theta) * r * this.bodyElongation + 0.5,
+        Math.sin(theta) * Math.sin(phi) * r
+      );
+      bump.scale.setScalar(0);
+      this.body.add(bump);
+      this.bumps.push({ mesh: bump });
+    }
+  }
+
+  update(dt, time) {
+    if (!this.alive) return;
+
+    this.age += dt;
+
+    // Growth
+    const growthRate = 0.03 * config.growthSpeed;
+    if (this.growth < 1) {
+      this.growth = Math.min(1, this.growth + dt * growthRate);
+    }
+
+    // Scale up from tiny
+    const targetScale = this.bodyScale * this.growth;
+    this.group.scale.setScalar(THREE.MathUtils.lerp(this.group.scale.x, targetScale, dt * 2));
+
+    // Growth phases
+    if (this.growth < 0.3) {
+      this.growthPhase = 0;
+    } else if (this.growth < 0.6) {
+      this.growthPhase = 1;
+    } else {
+      this.growthPhase = 2;
+    }
+
+    // Phase transitions — add features
+    if (this.growthPhase >= 1 && this.lastPhase < 1) {
+      this.addEyes();
+      this.addBumps();
+      audio.playGrowth(this.index);
+    }
+    if (this.growthPhase >= 2 && this.lastPhase < 2) {
+      this.addTentacles();
+      this.addArms();
+      audio.playGrowth(this.index + 3);
+    }
+    this.lastPhase = this.growthPhase;
+
+    // Animate eyes appearing
+    this.eyes.forEach(eye => {
+      const ts = eye.targetScale * Math.min(1, (this.growth - 0.3) / 0.15);
+      eye.group.scale.setScalar(THREE.MathUtils.lerp(eye.group.scale.x, Math.max(0, ts), dt * 3));
+    });
+
+    // Animate tentacles appearing
+    this.tentacles.forEach(t => {
+      const ts = Math.min(1, (this.growth - 0.6) / 0.2);
+      t.mesh.scale.setScalar(THREE.MathUtils.lerp(t.mesh.scale.x, Math.max(0, ts), dt * 2));
+    });
+
+    // Animate arms appearing
+    this.arms.forEach(a => {
+      const ts = Math.min(1, (this.growth - 0.6) / 0.25);
+      a.group.scale.setScalar(THREE.MathUtils.lerp(a.group.scale.x, Math.max(0, ts), dt * 2));
+    });
+
+    // Animate bumps
+    this.bumps.forEach(b => {
+      const ts = Math.min(1, (this.growth - 0.3) / 0.3);
+      b.mesh.scale.setScalar(THREE.MathUtils.lerp(b.mesh.scale.x, Math.max(0, ts), dt * 2));
+    });
+
+    // Breathing animation
+    if (this.body) {
+      const breathe = 1 + Math.sin(time * this.breatheSpeed) * this.wobbleAmount * 3;
+      this.body.scale.set(breathe, 1 / breathe, breathe);
+    }
+
+    // Eye tracking (look toward center or random)
+    this.eyes.forEach((eye, i) => {
+      const lookX = Math.sin(time * 0.5 + i) * 0.05;
+      const lookY = Math.cos(time * 0.3 + i) * 0.03;
+      if (eye.group.children[2]) { // pupil
+        eye.group.children[2].position.x = lookX;
+        eye.group.children[2].position.y = lookY;
+      }
+    });
+
+    // Tentacle wiggle
+    this.tentacles.forEach(t => {
+      if (t.mesh.scale.x > 0.1) {
+        t.mesh.rotation.y = Math.sin(time * t.wiggleSpeed + t.wiggleOffset) * 0.2;
+        t.mesh.rotation.x = Math.sin(time * t.wiggleSpeed * 0.7 + t.wiggleOffset) * 0.1;
+      }
+    });
+
+    // Arm waving
+    this.arms.forEach(a => {
+      if (a.group.scale.x > 0.1) {
+        a.group.rotation.x = Math.sin(time * a.waveSpeed + a.waveOffset) * 0.3;
+        a.group.rotation.z = Math.sin(time * a.waveSpeed * 0.8 + a.waveOffset + 1) * 0.2;
+      }
+    });
+
+    // Movement — slow wander within dish
+    this.moveTimer += dt;
+    if (this.moveTimer > this.moveChangeInterval) {
+      this.moveTimer = 0;
+      this.moveAngle += (Math.random() - 0.5) * Math.PI;
+      this.moveChangeInterval = 2 + Math.random() * 5;
+      if (this.growth > 0.2 && Math.random() < 0.3) {
+        audio.playSquish();
+      }
+    }
+
+    const speed = this.moveSpeed * this.growth * dt;
+    const newX = this.group.position.x + Math.cos(this.moveAngle) * speed;
+    const newZ = this.group.position.z + Math.sin(this.moveAngle) * speed;
+    const dist = Math.sqrt(newX * newX + newZ * newZ);
+
+    if (dist < dishRadius - 1.5) {
+      this.group.position.x = newX;
+      this.group.position.z = newZ;
+    } else {
+      // Bounce back toward center
+      this.moveAngle = Math.atan2(-this.group.position.z, -this.group.position.x) + (Math.random() - 0.5);
+    }
+
+    // Wobble rotation
+    this.group.rotation.y += Math.sin(time * this.wobbleSpeed) * this.wobbleAmount * dt;
+    this.group.rotation.z = Math.sin(time * this.wobbleSpeed * 0.7) * 0.02;
+
+    // Color mutation over time
+    if (config.mutationRate > 0) {
+      const hsl = {};
+      this.bodyMat.color.getHSL(hsl);
+      hsl.h += Math.sin(time * 0.1 + this.index) * config.mutationRate * 0.001;
+      this.bodyMat.color.setHSL(hsl.h, hsl.s, hsl.l);
+    }
+  }
+
+  dispose() {
+    this.alive = false;
+    scene.remove(this.group);
+    this.group.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+        else child.material.dispose();
+      }
+    });
+  }
+}
+
+// ============================================================================
+// PARTICLE SYSTEM — Floating spores
+// ============================================================================
+
+class ParticleSystem {
+  constructor(count) {
+    this.count = count;
+    const geo = new THREE.BufferGeometry();
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const sizes = new Float32Array(count);
+    this.velocities = [];
+
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * dishRadius * 0.9;
+      positions[i * 3] = Math.cos(angle) * r;
+      positions[i * 3 + 1] = 0.1 + Math.random() * 2;
+      positions[i * 3 + 2] = Math.sin(angle) * r;
+
+      const c = new THREE.Color().setHSL(0.3 + Math.random() * 0.3, 0.5, 0.6 + Math.random() * 0.3);
+      colors[i * 3] = c.r;
+      colors[i * 3 + 1] = c.g;
+      colors[i * 3 + 2] = c.b;
+
+      sizes[i] = 0.02 + Math.random() * 0.04;
+
+      this.velocities.push({
+        x: (Math.random() - 0.5) * 0.02,
+        y: (Math.random() - 0.5) * 0.005,
+        z: (Math.random() - 0.5) * 0.02,
+      });
+    }
+
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+    const mat = new THREE.PointsMaterial({
+      size: 0.06,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.6,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+
+    this.points = new THREE.Points(geo, mat);
+    scene.add(this.points);
+  }
+
+  update(dt, time) {
+    const positions = this.points.geometry.attributes.position.array;
+    for (let i = 0; i < this.count; i++) {
+      const v = this.velocities[i];
+      positions[i * 3] += v.x * dt * 10;
+      positions[i * 3 + 1] += v.y * dt * 10 + Math.sin(time + i) * 0.001;
+      positions[i * 3 + 2] += v.z * dt * 10;
+
+      // Keep within dish
+      const x = positions[i * 3];
+      const z = positions[i * 3 + 2];
+      const d = Math.sqrt(x * x + z * z);
+      if (d > dishRadius * 0.9) {
+        v.x *= -0.5;
+        v.z *= -0.5;
+      }
+      // Keep vertical
+      if (positions[i * 3 + 1] < 0.05) { positions[i * 3 + 1] = 0.05; v.y = Math.abs(v.y); }
+      if (positions[i * 3 + 1] > 3) { positions[i * 3 + 1] = 3; v.y = -Math.abs(v.y); }
+    }
+    this.points.geometry.attributes.position.needsUpdate = true;
+  }
+}
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+let creatures = [];
+let particles;
+let clock = new THREE.Clock();
+let started = false;
+
+function spawnCreatures() {
+  creatures.forEach(c => c.dispose());
+  creatures = [];
+  for (let i = 0; i < config.creatureCount; i++) {
+    const creature = new Creature(i);
+    creatures.push(creature);
+    // Stagger spawn with delay
+    setTimeout(() => {
+      audio.playSpawn();
+    }, i * 400 + Math.random() * 200);
+  }
+}
+
+function init() {
+  particles = new ParticleSystem(config.particleCount);
+  spawnCreatures();
+}
+
+// ============================================================================
+// DAT.GUI CONTROL PANEL
+// ============================================================================
+
+function setupGUI() {
+  const gui = new dat.GUI({ width: 280 });
+
+  const sim = gui.addFolder('Simulation');
+  sim.add(config, 'growthSpeed', 0.1, 5.0).name('Growth Speed').onChange(() => audio.playBlip());
+  sim.add(config, 'mutationRate', 0.0, 1.0).name('Mutation Rate').onChange(() => audio.playBlip());
+  sim.add(config, 'paused').name('Pause').onChange(() => audio.playBlip());
+  sim.open();
+
+  const visuals = gui.addFolder('Visuals');
+  visuals.addColor(config, 'dishColor').name('Dish Color').onChange(v => {
+    agarMat.color.set(v);
+    audio.playBlip();
+  });
+  visuals.add(config, 'bloomIntensity', 0.0, 3.0).name('Bloom').onChange(v => {
+    bloomPass.strength = v;
+  });
+  visuals.add(config, 'autoRotate').name('Auto-Rotate').onChange(v => {
+    controls.autoRotate = v;
+    audio.playBlip();
+  });
+  visuals.open();
+
+  const sound = gui.addFolder('Sound');
+  sound.add(config, 'soundVolume', 0.0, 1.0).name('Volume').onChange(v => {
+    audio.setVolume(v);
+  });
+  sound.open();
+
+  // Actions
+  const actions = {
+    resetDish: () => {
+      audio.playSpawn();
+      spawnCreatures();
+    }
+  };
+  gui.add(actions, 'resetDish').name('New Dish');
+}
+
+// ============================================================================
+// ANIMATION LOOP
+// ============================================================================
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const time = clock.elapsedTime;
+
+  if (!config.paused && started) {
+    creatures.forEach(c => c.update(dt, time));
+    if (particles) particles.update(dt, time);
+  }
+
+  controls.update();
+
+  // Animate point lights
+  pointLight1.position.x = Math.sin(time * 0.3) * 4;
+  pointLight1.position.z = Math.cos(time * 0.3) * 4;
+  pointLight2.position.x = Math.sin(time * 0.2 + 2) * 3;
+  pointLight2.position.z = Math.cos(time * 0.2 + 2) * 3;
+
+  composer.render();
+}
+
+// ============================================================================
+// START
+// ============================================================================
+
+const overlay = document.getElementById('overlay');
+overlay.addEventListener('click', () => {
+  overlay.classList.add('hidden');
+  audio.init();
+  started = true;
+  init();
+  setupGUI();
+  setTimeout(() => overlay.remove(), 1000);
+});
+
+// Handle resize
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate();
+</script>
+</body>
+</html>
