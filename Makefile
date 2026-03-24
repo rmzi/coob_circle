@@ -3,7 +3,7 @@ BUCKET = petri-rmzi-world
 # After first `terraform apply`, run:
 #   cd infra && terraform output -raw cloudfront_distribution_id
 # and paste the value here.
-DIST_ID = PLACEHOLDER
+DIST_ID = EH74U0BWOIMDK
 
 .PHONY: deploy serve
 
